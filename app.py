@@ -1,35 +1,33 @@
 import os
-import tempfile
-import subprocess
 import sqlite3
 import requests
 import feedparser
-import pandas as pd
+import gradio as gr
 from datetime import datetime
+from PyPDF2 import PdfReader
+from openai import OpenAI
 
-from flask import Flask, render_template, request, jsonify, send_file
+# ===============================
+# CONFIGURATION
+# ===============================
 
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
-
-from gtts import gTTS
-from faster_whisper import WhisperModel
-
-# =============================
-# App Setup
-# =============================
-
-app = Flask(__name__)
 DB_FILE = "papers.db"
 
 ARXIV_FEEDS = [
     "http://export.arxiv.org/rss/q-bio.CV",
     "http://export.arxiv.org/rss/q-bio.ONC",
+    "http://export.arxiv.org/rss/q-bio.PE"
 ]
 
-# =============================
-# Database
-# =============================
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+if not OPENAI_API_KEY:
+    raise ValueError("❌ OPENAI_API_KEY environment variable not set")
+
+client = OpenAI(api_key=OPENAI_API_KEY)
+
+# ===============================
+# DATABASE INITIALIZATION
+# ===============================
 
 conn = sqlite3.connect(DB_FILE, check_same_thread=False)
 c = conn.cursor()
@@ -40,17 +38,19 @@ CREATE TABLE IF NOT EXISTS papers (
     title TEXT UNIQUE,
     abstract TEXT,
     pdf_url TEXT,
+    source TEXT,
     added_on TEXT
 )
 """)
+
 conn.commit()
 
-# =============================
-# Fetch arXiv Papers
-# =============================
+# ===============================
+# FETCH PAPERS FROM ARXIV
+# ===============================
 
 def fetch_arxiv_papers():
-    added = 0
+    new_papers = []
 
     for feed_url in ARXIV_FEEDS:
         feed = feedparser.parse(feed_url)
@@ -59,148 +59,160 @@ def fetch_arxiv_papers():
             title = entry.title.strip()
             abstract = entry.summary.strip()
             pdf_url = entry.link.replace("abs", "pdf")
+            source = "arXiv"
             added_on = datetime.utcnow().isoformat()
 
-            c.execute("SELECT id FROM papers WHERE title=?", (title,))
+            # Skip duplicates
+            c.execute("SELECT 1 FROM papers WHERE title = ?", (title,))
             if c.fetchone():
                 continue
 
             c.execute("""
-                INSERT INTO papers (title, abstract, pdf_url, added_on)
-                VALUES (?, ?, ?, ?)
-            """, (title, abstract, pdf_url, added_on))
+                INSERT INTO papers (title, abstract, pdf_url, source, added_on)
+                VALUES (?, ?, ?, ?, ?)
+            """, (title, abstract, pdf_url, source, added_on))
+
             conn.commit()
-            added += 1
 
-    return added
+            new_papers.append(f"• {title}\n  {pdf_url}")
 
-# =============================
-# Load Papers into TF-IDF
-# =============================
+    if not new_papers:
+        return "No new papers found."
 
-def load_vector_index():
-    df = pd.read_sql("SELECT * FROM papers", conn)
+    return "\n\n".join(new_papers)
 
-    if df.empty:
-        return None, None, None
+# ===============================
+# PDF TEXT EXTRACTION (OPTIONAL)
+# ===============================
 
-    documents = (
-        df["title"] + ". " + df["abstract"]
-    ).tolist()
+def extract_pdf_text(pdf_url):
+    try:
+        r = requests.get(pdf_url, timeout=20)
+        with open("temp.pdf", "wb") as f:
+            f.write(r.content)
 
-    vectorizer = TfidfVectorizer(
-        stop_words="english",
-        max_features=5000
+        reader = PdfReader("temp.pdf")
+        text = ""
+        for page in reader.pages[:5]:  # limit pages
+            text += page.extract_text() or ""
+
+        os.remove("temp.pdf")
+        return text[:4000]
+
+    except Exception:
+        return ""
+
+# ===============================
+# AI ANSWERING (OPENAI)
+# ===============================
+
+def answer_question(question):
+    c.execute("""
+        SELECT title, abstract, pdf_url
+        FROM papers
+        ORDER BY added_on DESC
+        LIMIT 10
+    """)
+    rows = c.fetchall()
+
+    if not rows:
+        return "⚠️ No research papers available yet. Please fetch papers first."
+
+    context = ""
+    for title, abstract, pdf_url in rows:
+        context += f"""
+Title: {title}
+Abstract: {abstract}
+Link: {pdf_url}
+
+"""
+
+    prompt = f"""
+You are a medical research assistant.
+
+RULES:
+- Answer ONLY using the research context
+- If evidence is limited, say so clearly
+- Do NOT give medical diagnosis
+- Cite paper titles in references
+
+RESEARCH CONTEXT:
+{context}
+
+USER QUESTION:
+{question}
+
+FORMAT:
+- Clear explanation
+- Bullet points if useful
+- References section
+"""
+
+    response = client.responses.create(
+        model="gpt-4.1-mini",
+        input=prompt,
+        max_output_tokens=700
     )
-    vectors = vectorizer.fit_transform(documents)
 
-    return df, vectorizer, vectors
+    return response.output_text.strip()
 
-# =============================
-# Research-Based Answering
-# =============================
+# ===============================
+# GRADIO CHAT INTERFACE
+# ===============================
 
-def get_best_answer(question):
-    df, vectorizer, vectors = load_vector_index()
+def chat_interface(question):
+    if not question.strip():
+        return "Please enter a valid health-related question."
+    return answer_question(question)
 
-    if df is None:
-        return "No research papers available yet. Please fetch papers first."
+with gr.Blocks(title="Health Research Chatbot") as demo:
+    gr.Markdown("""
+# 🩺 Health Research Chatbot
 
-    user_vec = vectorizer.transform([question])
-    sims = cosine_similarity(user_vec, vectors).flatten()
+Ask health-related questions and receive **evidence-based answers**
+derived from **real research papers (arXiv)**.
 
-    top_idx = sims.argmax()
-    score = sims[top_idx]
+⚠️ **Disclaimer:**  
+This tool provides research summaries only and does **not** replace
+professional medical advice.
+""")
 
-    if score < 0.25:
-        return (
-            "I could not find strong evidence in the current research papers. "
-            "Please consult a medical professional."
+    with gr.Row():
+        question_input = gr.Textbox(
+            label="Your Question",
+            placeholder="e.g. What does research say about cancer immunotherapy?",
+            scale=4
         )
+        ask_btn = gr.Button("Ask", scale=1)
 
-    paper = df.iloc[top_idx]
-
-    return (
-        f"📄 **Based on research findings:**\n\n"
-        f"{paper['abstract']}\n\n"
-        f"🔗 **Source:** {paper['title']}\n{paper['pdf_url']}"
+    answer_output = gr.Textbox(
+        label="Answer",
+        lines=14,
+        interactive=False
     )
 
-# =============================
-# Text-to-Speech
-# =============================
-
-def text_to_speech(text):
-    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".mp3")
-    gTTS(text).save(tmp.name)
-    return tmp.name
-
-# =============================
-# Whisper STT
-# =============================
-
-whisper_model = WhisperModel("tiny", device="cpu")
-
-@app.route("/stt", methods=["POST"])
-def stt():
-    if "audio" not in request.files:
-        return jsonify({"error": "No audio uploaded"}), 400
-
-    audio = request.files["audio"]
-    tmp_webm = tempfile.NamedTemporaryFile(delete=False, suffix=".webm").name
-    audio.save(tmp_webm)
-
-    tmp_wav = tmp_webm.replace(".webm", ".wav")
-
-    subprocess.run([
-        "ffmpeg", "-i", tmp_webm,
-        "-ar", "16000", "-ac", "1",
-        tmp_wav, "-y", "-loglevel", "quiet"
-    ], check=True)
-
-    segments, _ = whisper_model.transcribe(tmp_wav)
-    transcript = " ".join(seg.text for seg in segments).strip()
-
-    response = get_best_answer(transcript) if transcript else "I didn’t catch that."
-
-    return jsonify({
-        "transcript": transcript,
-        "response": response
-    })
-
-# =============================
-# Routes
-# =============================
-
-@app.route("/")
-def home():
-    return render_template("index.html")
-
-@app.route("/get_response", methods=["POST"])
-def get_response():
-    user_input = request.form["user_input"]
-    response = get_best_answer(user_input)
-    return render_template(
-        "index.html",
-        user_input=user_input,
-        chatbot_response=response
+    ask_btn.click(
+        fn=chat_interface,
+        inputs=question_input,
+        outputs=answer_output
     )
 
-@app.route("/speak_response", methods=["POST"])
-def speak_response():
-    text = request.get_json().get("text", "")
-    audio_path = text_to_speech(text)
-    return send_file(audio_path, mimetype="audio/mpeg")
+    gr.Markdown("## 📄 Research Papers")
 
-@app.route("/fetch_papers", methods=["POST"])
-def fetch_papers():
-    count = fetch_arxiv_papers()
-    return jsonify({"added": count})
+    fetch_btn = gr.Button("Fetch Latest Papers from arXiv")
+    fetch_output = gr.Textbox(
+        label="Newly Added Papers",
+        lines=10,
+        interactive=False
+    )
 
-# =============================
-# Run
-# =============================
+    fetch_btn.click(
+        fn=fetch_arxiv_papers,
+        outputs=fetch_output
+    )
 
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port, debug=True)
+# ===============================
+# LAUNCH
+# ===============================
+
+demo.launch(server_name="0.0.0.0", server_port=7860)
