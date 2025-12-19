@@ -1,3 +1,10 @@
+# --- Python 3.13 cgi compatibility patch ---
+import sys
+if sys.version_info >= (3, 13):
+    import types
+    sys.modules["cgi"] = types.ModuleType("cgi")
+# ------------------------------------------
+
 import os
 import requests
 import feedparser
