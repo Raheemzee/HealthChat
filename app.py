@@ -13,17 +13,19 @@ for k in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"]:
 
 import requests
 import feedparser
-from flask import Flask, render_template, request
+from flask import Flask, render_template, request, session
 from openai import OpenAI
 
 # ---------- Flask ----------
 app = Flask(__name__)
 
+# 🔐 REQUIRED for session storage
+app.secret_key = os.getenv("FLASK_SECRET_KEY", "dev-secret-key")
+
 # ---------- OpenAI ----------
-# API key is read automatically from environment variable OPENAI_API_KEY
 client = OpenAI()
 
-# ---------- External APIs ----------
+# ---------- APIs ----------
 ARXIV_API = "http://export.arxiv.org/api/query"
 PUBMED_API = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
 PUBMED_FETCH = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
@@ -33,35 +35,19 @@ PUBMED_FETCH = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
 # =================================================
 
 def fetch_arxiv_papers(query, max_results=5):
-    """
-    Fetch research papers from arXiv safely (URL-encoded)
-    """
     safe_query = quote_plus(query)
-
-    url = (
-        f"{ARXIV_API}"
-        f"?search_query=all:{safe_query}"
-        f"&start=0&max_results={max_results}"
-    )
-
+    url = f"{ARXIV_API}?search_query=all:{safe_query}&start=0&max_results={max_results}"
     feed = feedparser.parse(url)
 
-    papers = []
-    for entry in feed.entries:
-        papers.append({
-            "title": entry.title,
-            "summary": entry.summary,
-            "link": entry.link
-        })
-
-    return papers
+    return [{
+        "title": e.title,
+        "summary": e.summary,
+        "link": e.link
+    } for e in feed.entries]
 
 
 def fetch_pubmed_papers(query, max_results=5):
-    """
-    Fetch research papers from PubMed
-    """
-    search_resp = requests.get(
+    search = requests.get(
         PUBMED_API,
         params={
             "db": "pubmed",
@@ -72,7 +58,7 @@ def fetch_pubmed_papers(query, max_results=5):
         timeout=10
     ).json()
 
-    ids = search_resp.get("esearchresult", {}).get("idlist", [])
+    ids = search.get("esearchresult", {}).get("idlist", [])
     if not ids:
         return []
 
@@ -94,43 +80,30 @@ def fetch_pubmed_papers(query, max_results=5):
     } for pid in ids]
 
 # =================================================
-#                 AI ANSWERING
+#                 AI ANSWER
 # =================================================
 
 def answer_with_research(question):
-    """
-    Build research context and ask OpenAI
-    """
     papers = fetch_arxiv_papers(question) + fetch_pubmed_papers(question)
 
     if not papers:
-        return (
-            "I couldn't find sufficient research evidence for this question. "
-            "Please consult a qualified medical professional."
-        )
+        return "I couldn't find enough research evidence for this question."
 
     context = "\n\n".join(
-        f"Title: {p['title']}\n"
-        f"Summary: {p['summary']}\n"
-        f"Source: {p['link']}"
+        f"Title: {p['title']}\nSummary: {p['summary']}\nSource: {p['link']}"
         for p in papers
     )
 
     prompt = f"""
 You are a medical research assistant.
+Answer STRICTLY using the research evidence.
+Always cite sources.
 
-Answer the health question STRICTLY using the research evidence below.
-If evidence is limited or inconclusive, state it clearly.
-DO NOT give personal medical advice.
-Always cite sources at the end.
-
-RESEARCH EVIDENCE:
+RESEARCH:
 {context}
 
 QUESTION:
 {question}
-
-ANSWER:
 """
 
     response = client.chat.completions.create(
@@ -148,29 +121,29 @@ ANSWER:
 
 @app.route("/")
 def home():
-    return render_template("index.html")
+    # Initialize chat history if not exists
+    session.setdefault("chat_history", [])
+    return render_template("index.html", chat_history=session["chat_history"])
 
 
 @app.route("/get_response", methods=["POST"])
 def get_response():
     user_input = request.form.get("user_input", "").strip()
-
     if not user_input:
-        return render_template(
-            "index.html",
-            chatbot_response="Please enter a health-related question."
-        )
+        return home()
 
-    try:
-        answer = answer_with_research(user_input)
-    except Exception as e:
-        print("ERROR:", e)
-        answer = "An internal error occurred while processing your request."
+    answer = answer_with_research(user_input)
+
+    # 🔹 Store chat history
+    session["chat_history"].append({
+        "user": user_input,
+        "bot": answer
+    })
+    session.modified = True
 
     return render_template(
         "index.html",
-        user_input=user_input,
-        chatbot_response=answer
+        chat_history=session["chat_history"]
     )
 
 # =================================================
