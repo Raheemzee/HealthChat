@@ -68,7 +68,7 @@
 </head>
 
 <body>
-  <h1>🩺 MediQA – Health Research AI</h1>
+  <h1>🩺 AI Growth Hub – Health Research AI</h1>
 
   <div class="chat-container">
     <form action="/get_response" method="post">
@@ -80,13 +80,13 @@
 
     {% if user_input %}
     <div class="chat-box">
-      <div class="user">You asked:</div>
-      <div>{{ user_input }}</div>
+  {% for chat in chat_history %}
+    <div class="user">You: {{ chat.user }}</div>
+    <div class="bot">Bot: {{ chat.bot }}</div>
+    <hr>
+  {% endfor %}
+</div>
 
-      <div class="user" style="margin-top:15px;">AI Answer:</div>
-      <div class="bot">{{ chatbot_response }}</div>
-    </div>
-    {% endif %}
   </div>
 </body>
 </html>
