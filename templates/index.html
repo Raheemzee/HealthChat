@@ -78,14 +78,13 @@
       <button type="submit">Ask</button>
     </form>
 
-    {% if user_input %}
     <div class="chat-box">
-  {% for chat in chat_history %}
-    <div class="user">You: {{ chat.user }}</div>
-    <div class="bot">Bot: {{ chat.bot }}</div>
-    <hr>
-  {% endfor %}
-</div>
+      {% for chat in chat_history %}
+        <div class="user">You: {{ chat.user }}</div>
+        <div class="bot">Bot: {{ chat.bot }}</div>
+        <hr>
+      {% endfor %}
+    </div>
 
   </div>
 </body>
