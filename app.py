@@ -1,11 +1,15 @@
-# --- Python 3.13 cgi compatibility patch ---
+import os
 import sys
+
+# ---------- Python 3.13 cgi compatibility ----------
 if sys.version_info >= (3, 13):
     import types
     sys.modules["cgi"] = types.ModuleType("cgi")
-# ------------------------------------------
 
-import os
+# ---------- Disable Render proxy injection ----------
+for k in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"]:
+    os.environ.pop(k, None)
+
 import requests
 import feedparser
 from flask import Flask, render_template, request
@@ -13,89 +17,70 @@ from openai import OpenAI
 
 app = Flask(__name__)
 
-# ================= CONFIG =================
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-client = OpenAI(api_key=OPENAI_API_KEY)
+# ---------- OpenAI ----------
+client = OpenAI()  # API key read from env automatically
 
+# ---------- APIs ----------
 ARXIV_API = "http://export.arxiv.org/api/query"
 PUBMED_API = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
 PUBMED_FETCH = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
 
-# ================= PAPER FETCHERS =================
+# ---------- Paper Fetchers ----------
 def fetch_arxiv_papers(query, max_results=5):
-    params = {
-        "search_query": f"all:{query}",
-        "start": 0,
-        "max_results": max_results
-    }
-    feed = feedparser.parse(ARXIV_API, params=params)
-    papers = []
+    feed = feedparser.parse(
+        f"{ARXIV_API}?search_query=all:{query}&start=0&max_results={max_results}"
+    )
 
-    for entry in feed.entries:
-        papers.append({
-            "title": entry.title,
-            "summary": entry.summary,
-            "link": entry.link
-        })
-    return papers
-
+    return [{
+        "title": e.title,
+        "summary": e.summary,
+        "link": e.link
+    } for e in feed.entries]
 
 def fetch_pubmed_papers(query, max_results=5):
-    search_params = {
+    search = requests.get(PUBMED_API, params={
         "db": "pubmed",
         "term": query,
         "retmode": "json",
         "retmax": max_results
-    }
-    search_resp = requests.get(PUBMED_API, params=search_params).json()
-    ids = search_resp.get("esearchresult", {}).get("idlist", [])
+    }).json()
 
+    ids = search.get("esearchresult", {}).get("idlist", [])
     if not ids:
         return []
 
-    fetch_params = {
+    abstracts = requests.get(PUBMED_FETCH, params={
         "db": "pubmed",
         "id": ",".join(ids),
         "retmode": "text",
         "rettype": "abstract"
-    }
-    abstracts = requests.get(PUBMED_FETCH, params=fetch_params).text
+    }).text
 
     return [{
         "title": f"PubMed Article {pid}",
-        "summary": abstracts[:1000],
+        "summary": abstracts[:1200],
         "link": f"https://pubmed.ncbi.nlm.nih.gov/{pid}/"
     } for pid in ids]
 
-
-# ================= AI ANSWERING =================
+# ---------- AI Answer ----------
 def answer_with_research(question):
-    arxiv_papers = fetch_arxiv_papers(question)
-    pubmed_papers = fetch_pubmed_papers(question)
+    papers = fetch_arxiv_papers(question) + fetch_pubmed_papers(question)
 
-    context = ""
-    for p in arxiv_papers + pubmed_papers:
-        context += f"""
-Title: {p['title']}
-Summary: {p['summary']}
-Source: {p['link']}
-
-"""
+    context = "\n\n".join(
+        f"Title: {p['title']}\nSummary: {p['summary']}\nSource: {p['link']}"
+        for p in papers
+    )
 
     prompt = f"""
 You are a medical research assistant.
+Answer ONLY using the research below.
+Cite sources.
 
-Answer the health question strictly using the research context below.
-If evidence is limited, say so clearly.
-Always cite papers at the end.
-
-RESEARCH CONTEXT:
+RESEARCH:
 {context}
 
 QUESTION:
 {question}
-
-ANSWER:
 """
 
     response = client.chat.completions.create(
@@ -107,25 +92,18 @@ ANSWER:
 
     return response.choices[0].message.content
 
-
-# ================= ROUTES =================
+# ---------- Routes ----------
 @app.route("/")
 def home():
     return render_template("index.html")
 
-
 @app.route("/get_response", methods=["POST"])
 def get_response():
-    user_input = request.form.get("user_input")
-    answer = answer_with_research(user_input)
-    return render_template(
-        "index.html",
-        user_input=user_input,
-        chatbot_response=answer
-    )
+    q = request.form.get("user_input")
+    a = answer_with_research(q)
+    return render_template("index.html", user_input=q, chatbot_response=a)
 
-
-# ================= MAIN =================
+# ---------- Run ----------
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
