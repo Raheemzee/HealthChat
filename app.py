@@ -1,218 +1,124 @@
 import os
-import sqlite3
 import requests
 import feedparser
-import gradio as gr
-from datetime import datetime
-from PyPDF2 import PdfReader
+from flask import Flask, render_template, request
 from openai import OpenAI
 
-# ===============================
-# CONFIGURATION
-# ===============================
+app = Flask(__name__)
 
-DB_FILE = "papers.db"
-
-ARXIV_FEEDS = [
-    "http://export.arxiv.org/rss/q-bio.CV",
-    "http://export.arxiv.org/rss/q-bio.ONC",
-    "http://export.arxiv.org/rss/q-bio.PE"
-]
-
+# ================= CONFIG =================
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-if not OPENAI_API_KEY:
-    raise ValueError("❌ OPENAI_API_KEY environment variable not set")
-
 client = OpenAI(api_key=OPENAI_API_KEY)
 
-# ===============================
-# DATABASE INITIALIZATION
-# ===============================
+ARXIV_API = "http://export.arxiv.org/api/query"
+PUBMED_API = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
+PUBMED_FETCH = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
 
-conn = sqlite3.connect(DB_FILE, check_same_thread=False)
-c = conn.cursor()
+# ================= PAPER FETCHERS =================
+def fetch_arxiv_papers(query, max_results=5):
+    params = {
+        "search_query": f"all:{query}",
+        "start": 0,
+        "max_results": max_results
+    }
+    feed = feedparser.parse(ARXIV_API, params=params)
+    papers = []
 
-c.execute("""
-CREATE TABLE IF NOT EXISTS papers (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    title TEXT UNIQUE,
-    abstract TEXT,
-    pdf_url TEXT,
-    source TEXT,
-    added_on TEXT
-)
-""")
+    for entry in feed.entries:
+        papers.append({
+            "title": entry.title,
+            "summary": entry.summary,
+            "link": entry.link
+        })
+    return papers
 
-conn.commit()
 
-# ===============================
-# FETCH PAPERS FROM ARXIV
-# ===============================
+def fetch_pubmed_papers(query, max_results=5):
+    search_params = {
+        "db": "pubmed",
+        "term": query,
+        "retmode": "json",
+        "retmax": max_results
+    }
+    search_resp = requests.get(PUBMED_API, params=search_params).json()
+    ids = search_resp.get("esearchresult", {}).get("idlist", [])
 
-def fetch_arxiv_papers():
-    new_papers = []
+    if not ids:
+        return []
 
-    for feed_url in ARXIV_FEEDS:
-        feed = feedparser.parse(feed_url)
+    fetch_params = {
+        "db": "pubmed",
+        "id": ",".join(ids),
+        "retmode": "text",
+        "rettype": "abstract"
+    }
+    abstracts = requests.get(PUBMED_FETCH, params=fetch_params).text
 
-        for entry in feed.entries:
-            title = entry.title.strip()
-            abstract = entry.summary.strip()
-            pdf_url = entry.link.replace("abs", "pdf")
-            source = "arXiv"
-            added_on = datetime.utcnow().isoformat()
+    return [{
+        "title": f"PubMed Article {pid}",
+        "summary": abstracts[:1000],
+        "link": f"https://pubmed.ncbi.nlm.nih.gov/{pid}/"
+    } for pid in ids]
 
-            # Skip duplicates
-            c.execute("SELECT 1 FROM papers WHERE title = ?", (title,))
-            if c.fetchone():
-                continue
 
-            c.execute("""
-                INSERT INTO papers (title, abstract, pdf_url, source, added_on)
-                VALUES (?, ?, ?, ?, ?)
-            """, (title, abstract, pdf_url, source, added_on))
-
-            conn.commit()
-
-            new_papers.append(f"• {title}\n  {pdf_url}")
-
-    if not new_papers:
-        return "No new papers found."
-
-    return "\n\n".join(new_papers)
-
-# ===============================
-# PDF TEXT EXTRACTION (OPTIONAL)
-# ===============================
-
-def extract_pdf_text(pdf_url):
-    try:
-        r = requests.get(pdf_url, timeout=20)
-        with open("temp.pdf", "wb") as f:
-            f.write(r.content)
-
-        reader = PdfReader("temp.pdf")
-        text = ""
-        for page in reader.pages[:5]:  # limit pages
-            text += page.extract_text() or ""
-
-        os.remove("temp.pdf")
-        return text[:4000]
-
-    except Exception:
-        return ""
-
-# ===============================
-# AI ANSWERING (OPENAI)
-# ===============================
-
-def answer_question(question):
-    c.execute("""
-        SELECT title, abstract, pdf_url
-        FROM papers
-        ORDER BY added_on DESC
-        LIMIT 10
-    """)
-    rows = c.fetchall()
-
-    if not rows:
-        return "⚠️ No research papers available yet. Please fetch papers first."
+# ================= AI ANSWERING =================
+def answer_with_research(question):
+    arxiv_papers = fetch_arxiv_papers(question)
+    pubmed_papers = fetch_pubmed_papers(question)
 
     context = ""
-    for title, abstract, pdf_url in rows:
+    for p in arxiv_papers + pubmed_papers:
         context += f"""
-Title: {title}
-Abstract: {abstract}
-Link: {pdf_url}
+Title: {p['title']}
+Summary: {p['summary']}
+Source: {p['link']}
 
 """
 
     prompt = f"""
 You are a medical research assistant.
 
-RULES:
-- Answer ONLY using the research context
-- If evidence is limited, say so clearly
-- Do NOT give medical diagnosis
-- Cite paper titles in references
+Answer the health question strictly using the research context below.
+If evidence is limited, say so clearly.
+Always cite papers at the end.
 
 RESEARCH CONTEXT:
 {context}
 
-USER QUESTION:
+QUESTION:
 {question}
 
-FORMAT:
-- Clear explanation
-- Bullet points if useful
-- References section
+ANSWER:
 """
 
-    response = client.responses.create(
-        model="gpt-4.1-mini",
-        input=prompt,
-        max_output_tokens=700
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.2,
+        max_tokens=600
     )
 
-    return response.output_text.strip()
+    return response.choices[0].message.content
 
-# ===============================
-# GRADIO CHAT INTERFACE
-# ===============================
 
-def chat_interface(question):
-    if not question.strip():
-        return "Please enter a valid health-related question."
-    return answer_question(question)
+# ================= ROUTES =================
+@app.route("/")
+def home():
+    return render_template("index.html")
 
-with gr.Blocks(title="Health Research Chatbot") as demo:
-    gr.Markdown("""
-# 🩺 Health Research Chatbot
 
-Ask health-related questions and receive **evidence-based answers**
-derived from **real research papers (arXiv)**.
-
-⚠️ **Disclaimer:**  
-This tool provides research summaries only and does **not** replace
-professional medical advice.
-""")
-
-    with gr.Row():
-        question_input = gr.Textbox(
-            label="Your Question",
-            placeholder="e.g. What does research say about cancer immunotherapy?",
-            scale=4
-        )
-        ask_btn = gr.Button("Ask", scale=1)
-
-    answer_output = gr.Textbox(
-        label="Answer",
-        lines=14,
-        interactive=False
+@app.route("/get_response", methods=["POST"])
+def get_response():
+    user_input = request.form.get("user_input")
+    answer = answer_with_research(user_input)
+    return render_template(
+        "index.html",
+        user_input=user_input,
+        chatbot_response=answer
     )
 
-    ask_btn.click(
-        fn=chat_interface,
-        inputs=question_input,
-        outputs=answer_output
-    )
 
-    gr.Markdown("## 📄 Research Papers")
-
-    fetch_btn = gr.Button("Fetch Latest Papers from arXiv")
-    fetch_output = gr.Textbox(
-        label="Newly Added Papers",
-        lines=10,
-        interactive=False
-    )
-
-    fetch_btn.click(
-        fn=fetch_arxiv_papers,
-        outputs=fetch_output
-    )
-
-# ===============================
-# LAUNCH
-# ===============================
-
-demo.launch(server_name="0.0.0.0", server_port=7860)
+# ================= MAIN =================
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
