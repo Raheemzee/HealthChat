@@ -1,5 +1,6 @@
 import os
 import sys
+import uuid
 from urllib.parse import quote_plus
 
 # ---------- Python 3.13 cgi compatibility ----------
@@ -32,80 +33,72 @@ PUBMED_FETCH = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
 #                 PAPER FETCHERS
 # =================================================
 
-def fetch_arxiv_papers(query, max_results=5):
+def fetch_arxiv_papers(query, max_results=3):
     url = f"{ARXIV_API}?search_query=all:{quote_plus(query)}&start=0&max_results={max_results}"
     feed = feedparser.parse(url)
-
-    return [{
-        "title": e.title,
-        "summary": e.summary,
-        "link": e.link
-    } for e in feed.entries]
+    return [{"title": e.title, "summary": e.summary, "link": e.link} for e in feed.entries]
 
 
-def fetch_pubmed_papers(query, max_results=5):
-    search = requests.get(
-        PUBMED_API,
-        params={
-            "db": "pubmed",
-            "term": query,
-            "retmode": "json",
-            "retmax": max_results
-        },
-        timeout=10
-    ).json()
+def fetch_pubmed_papers(query, max_results=3):
+    search = requests.get(PUBMED_API, params={
+        "db": "pubmed",
+        "term": query,
+        "retmode": "json",
+        "retmax": max_results
+    }, timeout=10).json()
 
     ids = search.get("esearchresult", {}).get("idlist", [])
     if not ids:
         return []
 
-    abstracts = requests.get(
-        PUBMED_FETCH,
-        params={
-            "db": "pubmed",
-            "id": ",".join(ids),
-            "retmode": "text",
-            "rettype": "abstract"
-        },
-        timeout=10
-    ).text
+    abstracts = requests.get(PUBMED_FETCH, params={
+        "db": "pubmed",
+        "id": ",".join(ids),
+        "retmode": "text",
+        "rettype": "abstract"
+    }, timeout=10).text
 
     return [{
         "title": f"PubMed Article {pid}",
-        "summary": abstracts[:1200],
+        "summary": abstracts[:1000],
         "link": f"https://pubmed.ncbi.nlm.nih.gov/{pid}/"
     } for pid in ids]
 
 # =================================================
-#                 AI ANSWER
+#                 AI ANSWER WITH MEMORY
 # =================================================
 
-def answer_with_research(question):
+def answer_with_memory(chat_messages, question):
     papers = fetch_arxiv_papers(question) + fetch_pubmed_papers(question)
 
-    if not papers:
-        return "I couldn’t find strong research evidence for this question."
-
-    context = "\n\n".join(
+    research_context = "\n\n".join(
         f"Title: {p['title']}\nSummary: {p['summary']}\nSource: {p['link']}"
         for p in papers
     )
 
-    prompt = f"""
-You are a medical research assistant.
-Answer STRICTLY using the research evidence.
-Always cite sources.
+    system_prompt = {
+        "role": "system",
+        "content": (
+            "You are a medical research assistant.\n"
+            "You MUST use previous conversation context.\n"
+            "You MUST ground answers in scientific research.\n"
+            "If evidence is weak, say so clearly."
+        )
+    }
 
-RESEARCH:
-{context}
+    messages = [system_prompt]
 
-QUESTION:
-{question}
-"""
+    # 🔹 Include last 10 messages for memory
+    messages.extend(chat_messages[-10:])
+
+    messages.append({
+        "role": "user",
+        "content": f"RESEARCH:\n{research_context}\n\nQUESTION:\n{question}"
+    })
 
     response = client.chat.completions.create(
         model="gpt-4o-mini",
-        messages=[{"role": "user", "content": prompt}],
+        messages=messages,
         temperature=0.2,
         max_tokens=600
     )
@@ -118,8 +111,35 @@ QUESTION:
 
 @app.route("/")
 def home():
-    session.setdefault("chat_history", [])
-    return render_template("index.html", chat_history=session["chat_history"])
+    session.setdefault("conversations", {})
+    session.setdefault("active_chat", None)
+
+    if session["active_chat"] is None:
+        chat_id = str(uuid.uuid4())
+        session["conversations"][chat_id] = []
+        session["active_chat"] = chat_id
+
+    return render_template(
+        "index.html",
+        conversations=session["conversations"],
+        active_chat=session["active_chat"]
+    )
+
+
+@app.route("/new_chat", methods=["POST"])
+def new_chat():
+    chat_id = str(uuid.uuid4())
+    session["conversations"][chat_id] = []
+    session["active_chat"] = chat_id
+    session.modified = True
+    return jsonify({"chat_id": chat_id})
+
+
+@app.route("/switch_chat/<chat_id>")
+def switch_chat(chat_id):
+    if chat_id in session.get("conversations", {}):
+        session["active_chat"] = chat_id
+    return home()
 
 
 @app.route("/get_response", methods=["POST"])
@@ -130,19 +150,24 @@ def get_response():
     if not user_input:
         return jsonify({"error": "Empty message"}), 400
 
-    answer = answer_with_research(user_input)
+    chat_id = session["active_chat"]
+    chat_messages = session["conversations"][chat_id]
 
-    session["chat_history"].append({
-        "user": user_input,
-        "bot": answer
-    })
+    # Save user message
+    chat_messages.append({"role": "user", "content": user_input})
+
+    answer = answer_with_memory(chat_messages, user_input)
+
+    # Save assistant message
+    chat_messages.append({"role": "assistant", "content": answer})
+
     session.modified = True
 
-    return jsonify({
-        "user": user_input,
-        "bot": answer
-    })
+    return jsonify({"bot": answer})
 
+# =================================================
+#                     MAIN
+# =================================================
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
