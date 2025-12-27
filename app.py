@@ -7,19 +7,17 @@ if sys.version_info >= (3, 13):
     import types
     sys.modules["cgi"] = types.ModuleType("cgi")
 
-# ---------- Disable Render proxy injection ----------
+# ---------- Disable proxy injection ----------
 for k in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"]:
     os.environ.pop(k, None)
 
 import requests
 import feedparser
-from flask import Flask, render_template, request, session
+from flask import Flask, render_template, request, session, jsonify
 from openai import OpenAI
 
 # ---------- Flask ----------
 app = Flask(__name__)
-
-# 🔐 REQUIRED for session storage
 app.secret_key = os.getenv("FLASK_SECRET_KEY", "dev-secret-key")
 
 # ---------- OpenAI ----------
@@ -35,8 +33,7 @@ PUBMED_FETCH = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
 # =================================================
 
 def fetch_arxiv_papers(query, max_results=5):
-    safe_query = quote_plus(query)
-    url = f"{ARXIV_API}?search_query=all:{safe_query}&start=0&max_results={max_results}"
+    url = f"{ARXIV_API}?search_query=all:{quote_plus(query)}&start=0&max_results={max_results}"
     feed = feedparser.parse(url)
 
     return [{
@@ -87,7 +84,7 @@ def answer_with_research(question):
     papers = fetch_arxiv_papers(question) + fetch_pubmed_papers(question)
 
     if not papers:
-        return "I couldn't find enough research evidence for this question."
+        return "I couldn’t find strong research evidence for this question."
 
     context = "\n\n".join(
         f"Title: {p['title']}\nSummary: {p['summary']}\nSource: {p['link']}"
@@ -121,34 +118,31 @@ QUESTION:
 
 @app.route("/")
 def home():
-    # Initialize chat history if not exists
     session.setdefault("chat_history", [])
     return render_template("index.html", chat_history=session["chat_history"])
 
 
 @app.route("/get_response", methods=["POST"])
 def get_response():
-    user_input = request.form.get("user_input", "").strip()
+    data = request.json
+    user_input = data.get("message", "").strip()
+
     if not user_input:
-        return home()
+        return jsonify({"error": "Empty message"}), 400
 
     answer = answer_with_research(user_input)
 
-    # 🔹 Store chat history
     session["chat_history"].append({
         "user": user_input,
         "bot": answer
     })
     session.modified = True
 
-    return render_template(
-        "index.html",
-        chat_history=session["chat_history"]
-    )
+    return jsonify({
+        "user": user_input,
+        "bot": answer
+    })
 
-# =================================================
-#                     MAIN
-# =================================================
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
