@@ -5,20 +5,43 @@
 <title>AI Growth Hub – Health Research AI</title>
 
 <style>
+/* ================= THEME VARIABLES ================= */
+:root {
+  --bg: #0f172a;
+  --sidebar: #020617;
+  --border: #1e293b;
+  --text: #e5e7eb;
+  --bot: #020617;
+  --input: #020617;
+  --primary: #2563eb;
+}
+
+/* ===== LIGHT THEME ===== */
+body.light {
+  --bg: #f4f6fb;
+  --sidebar: #ffffff;
+  --border: #d1d5db;
+  --text: #111827;
+  --bot: #ffffff;
+  --input: #ffffff;
+  --primary: #2563eb;
+}
+
+/* ================= BASE ================= */
 body {
   margin: 0;
   font-family: system-ui, sans-serif;
-  background: #0f172a;
+  background: var(--bg);
   height: 100vh;
   display: flex;
-  color: #e5e7eb;
+  color: var(--text);
 }
 
 /* ===== SIDEBAR ===== */
 .sidebar {
   width: 260px;
-  background: #020617;
-  border-right: 1px solid #1e293b;
+  background: var(--sidebar);
+  border-right: 1px solid var(--border);
   padding: 14px;
   overflow-y: auto;
 }
@@ -27,7 +50,7 @@ body {
   width: 100%;
   margin-bottom: 10px;
   padding: 10px;
-  background: #2563eb;
+  background: var(--primary);
   border: none;
   border-radius: 10px;
   color: white;
@@ -39,12 +62,12 @@ body {
   padding: 8px;
   margin-bottom: 6px;
   border-radius: 8px;
-  color: #e5e7eb;
+  color: var(--text);
   text-decoration: none;
 }
 
 .chat-link.active {
-  background: #1e293b;
+  background: var(--border);
 }
 
 /* ===== MAIN ===== */
@@ -56,7 +79,7 @@ body {
 
 header {
   padding: 12px 16px;
-  border-bottom: 1px solid #1e293b;
+  border-bottom: 1px solid var(--border);
   display: flex;
   justify-content: space-between;
   align-items: center;
@@ -66,6 +89,7 @@ header {
 .header-controls {
   display: flex;
   gap: 8px;
+  align-items: center;
 }
 
 /* ===== CHAT ===== */
@@ -85,14 +109,15 @@ header {
 }
 
 .user {
-  background: #2563eb;
+  background: var(--primary);
+  color: white;
   margin-left: auto;
   border-bottom-right-radius: 6px;
 }
 
 .bot {
-  background: #020617;
-  border: 1px solid #1e293b;
+  background: var(--bot);
+  border: 1px solid var(--border);
   margin-right: auto;
   border-bottom-left-radius: 6px;
 }
@@ -101,33 +126,35 @@ header {
 .input-bar {
   display: flex;
   padding: 14px;
-  border-top: 1px solid #1e293b;
+  border-top: 1px solid var(--border);
 }
 
 input {
   flex: 1;
   padding: 12px 16px;
   border-radius: 20px;
-  border: none;
-  background: #020617;
-  color: #e5e7eb;
+  border: 1px solid var(--border);
+  background: var(--input);
+  color: var(--text);
+  outline: none;
 }
 
 button.send,
-button.voice {
+button.voice,
+button.theme {
   margin-left: 8px;
   border-radius: 50%;
   padding: 10px 14px;
-  background: #2563eb;
+  background: var(--primary);
   border: none;
   color: white;
   cursor: pointer;
 }
 
 select {
-  background: #020617;
-  color: #e5e7eb;
-  border: 1px solid #1e293b;
+  background: var(--input);
+  color: var(--text);
+  border: 1px solid var(--border);
   border-radius: 10px;
   padding: 6px;
 }
@@ -150,6 +177,7 @@ select {
 <header>
   🩺 AI Growth Hub – Health Research AI
   <div class="header-controls">
+    <button class="theme" onclick="toggleTheme()" id="themeBtn">🌙</button>
     <select id="voiceSelect"></select>
     <button onclick="toggleVoice()" id="voiceBtn">🔊</button>
   </div>
@@ -171,54 +199,56 @@ select {
 </div>
 
 <script>
-const chat = document.getElementById("chat");
+/* ================= THEME ================= */
+const themeBtn = document.getElementById("themeBtn");
+
+function setTheme(mode) {
+  document.body.className = mode;
+  localStorage.setItem("theme", mode);
+  themeBtn.textContent = mode === "light" ? "🌞" : "🌙";
+}
+
+function toggleTheme() {
+  setTheme(document.body.classList.contains("light") ? "" : "light");
+}
+
+setTheme(localStorage.getItem("theme") || "");
+
+/* ================= VOICE ================= */
 const synth = window.speechSynthesis;
 const voiceSelect = document.getElementById("voiceSelect");
-
 let voices = [];
 let voiceEnabled = true;
 
-/* ===== LOAD VOICES ===== */
 function loadVoices() {
   voices = synth.getVoices();
   voiceSelect.innerHTML = "";
-
-  voices
-    .filter(v => v.lang.startsWith("en"))
-    .forEach((voice, i) => {
-      const option = document.createElement("option");
-      option.value = i;
-      option.textContent = `${voice.name} (${voice.lang})`;
-      voiceSelect.appendChild(option);
-    });
+  voices.filter(v => v.lang.startsWith("en")).forEach((v, i) => {
+    const o = document.createElement("option");
+    o.value = i;
+    o.textContent = v.name;
+    voiceSelect.appendChild(o);
+  });
 }
-
 synth.onvoiceschanged = loadVoices;
 
-/* ===== SPEAK ===== */
 function speak(text) {
-  if (!voiceEnabled || !synth) return;
-
+  if (!voiceEnabled) return;
   synth.cancel();
-  const utter = new SpeechSynthesisUtterance(text);
-  utter.voice = voices[voiceSelect.value] || null;
-  utter.rate = 1;
-  utter.pitch = 1;
-  synth.speak(utter);
+  const u = new SpeechSynthesisUtterance(text);
+  u.voice = voices[voiceSelect.value] || null;
+  synth.speak(u);
 }
 
-/* ===== SEND MESSAGE ===== */
+/* ================= CHAT ================= */
 async function sendMessage() {
   const input = document.getElementById("message");
-  const text = input.value.trim();
-  if (!text) return;
-
-  input.value = "";
+  if (!input.value.trim()) return;
 
   const res = await fetch("/get_response", {
     method: "POST",
     headers: {"Content-Type": "application/json"},
-    body: JSON.stringify({message: text})
+    body: JSON.stringify({message: input.value})
   });
 
   const data = await res.json();
@@ -226,24 +256,15 @@ async function sendMessage() {
   location.reload();
 }
 
-/* ===== VOICE INPUT ===== */
 function startVoice() {
-  if (!('webkitSpeechRecognition' in window)) {
-    alert("Voice input not supported.");
-    return;
-  }
-
-  const recognition = new webkitSpeechRecognition();
-  recognition.lang = "en-US";
-  recognition.start();
-
-  recognition.onresult = e => {
-    document.getElementById("message").value =
-      e.results[0][0].transcript;
-  };
+  if (!('webkitSpeechRecognition' in window)) return alert("Not supported");
+  const r = new webkitSpeechRecognition();
+  r.lang = "en-US";
+  r.start();
+  r.onresult = e => document.getElementById("message").value =
+    e.results[0][0].transcript;
 }
 
-/* ===== TOGGLE VOICE ===== */
 function toggleVoice() {
   voiceEnabled = !voiceEnabled;
   document.getElementById("voiceBtn").textContent =
@@ -251,7 +272,6 @@ function toggleVoice() {
   if (!voiceEnabled) synth.cancel();
 }
 
-/* ===== NEW CHAT ===== */
 async function newChat() {
   await fetch("/new_chat", { method: "POST" });
   location.reload();
