@@ -207,11 +207,9 @@ function setTheme(mode) {
   localStorage.setItem("theme", mode);
   themeBtn.textContent = mode === "light" ? "🌞" : "🌙";
 }
-
 function toggleTheme() {
   setTheme(document.body.classList.contains("light") ? "" : "light");
 }
-
 setTheme(localStorage.getItem("theme") || "");
 
 /* ================= VOICE ================= */
@@ -241,19 +239,32 @@ function speak(text) {
 }
 
 /* ================= CHAT ================= */
+function appendMessage(text, role) {
+  const div = document.createElement("div");
+  div.className = "message " + (role === "user" ? "user" : "bot");
+  div.textContent = text;
+  document.getElementById("chat").appendChild(div);
+  document.getElementById("chat").scrollTop =
+    document.getElementById("chat").scrollHeight;
+}
+
 async function sendMessage() {
   const input = document.getElementById("message");
-  if (!input.value.trim()) return;
+  const text = input.value.trim();
+  if (!text) return;
+
+  appendMessage(text, "user");
+  input.value = "";
 
   const res = await fetch("/get_response", {
     method: "POST",
     headers: {"Content-Type": "application/json"},
-    body: JSON.stringify({message: input.value})
+    body: JSON.stringify({message: text})
   });
 
   const data = await res.json();
+  appendMessage(data.bot, "bot");
   speak(data.bot);
-  location.reload();
 }
 
 function startVoice() {
